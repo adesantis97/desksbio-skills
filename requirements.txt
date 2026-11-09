@@ -1,6 +1,0 @@
-numpy
-pandas
-pillow
-scipy
-scikit-image
-openpyxl
