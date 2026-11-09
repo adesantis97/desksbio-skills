@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Colony review</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#f6f7f9; --fg:#1d1f24; --muted:#6b7280; --card:#fff; --line:#e3e6ea;
+          --keep:#12a150; --drop:#dc2626; --add:#f59e0b; --accent:#3494BA; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#15171b; --fg:#e8eaed; --muted:#9aa0a6; --card:#1e2126; --line:#2c3036; }
+  }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.45 -apple-system, system-ui, sans-serif; }
+  header { position:sticky; top:0; z-index:5; background:var(--card); border-bottom:1px solid var(--line);
+           padding:10px 16px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0 12px 0 0; }
+  button { font:inherit; border:1px solid var(--line); background:var(--card); color:var(--fg);
+           border-radius:6px; padding:6px 12px; cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .legend span { margin-right:12px; } .legend i { display:inline-block; width:10px; height:10px;
+           border-radius:50%; border:2px solid; margin-right:4px; vertical-align:-1px; }
+  main { padding:16px; display:grid; gap:20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; }
+  .card h2 { font-size:14px; margin:0 0 8px; }
+  .wrap { position:relative; overflow:auto; }
+  canvas { display:block; cursor:crosshair; max-width:none; }
+  table { border-collapse:collapse; margin-top:10px; font-variant-numeric:tabular-nums; }
+  td, th { padding:3px 10px; border-bottom:1px solid var(--line); text-align:right; }
+  th:first-child, td:first-child { text-align:left; }
+  .hint { color:var(--muted); font-size:13px; }
+  .zoom { margin-left:auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Colony review</h1>
+  <span class="legend"><span><i style="border-color:var(--keep)"></i>colony</span>
+    <span><i style="border-color:var(--drop)"></i>removed</span>
+    <span><i style="border-color:var(--add)"></i>added</span></span>
+  <span class="hint">Click a circle = remove/restore · click an empty spot = add · click an orange circle = delete it</span>
+  <span class="zoom">Zoom <input id="zoom" type="range" min="1" max="4" step="0.5" value="2"></span>
+  <button id="save" class="primary">Save and recompute</button>
+  <button id="done">Done</button>
+  <span id="status" class="hint"></span>
+</header>
+<main id="main"></main>
+<script>
+const DATA = /*__DATA__*/null;
+const KEY = "colony-review:" + Object.keys(DATA.store).join("|");
+// base = corrections already saved in the folder; on top, any unsaved edits from this browser
+let corr = JSON.parse(JSON.stringify(DATA.corrections || {}));
+try { const d = JSON.parse(localStorage.getItem(KEY) || "null"); if (d) corr = d; } catch (e) {}
+const SERVED = location.protocol.startsWith("http");
+const persist = () => { try { localStorage.setItem(KEY, JSON.stringify(corr)); } catch (e) {} };
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+let Z = 2; const views = [];
+
+function cfor(img, dish) {
+  corr[img] ??= {}; corr[img][dish] ??= { remove: [], add: [] }; return corr[img][dish];
+}
+
+for (const [name, s] of Object.entries(DATA.store)) {
+  const card = document.createElement("section"); card.className = "card";
+  card.innerHTML = `<h2>${name} <span class="hint">colour threshold ${s.threshold.toFixed(0)} · * = without the added colonies, measured on save</span></h2>
+    <div class="wrap"><canvas></canvas></div><table><thead><tr><th>Dish</th><th>auto</th>
+    <th>removed</th><th>added</th><th>final</th><th>mean size (px)</th></tr></thead><tbody></tbody></table>`;
+  document.getElementById("main").append(card);
+  const cv = card.querySelector("canvas"), tb = card.querySelector("tbody");
+  const im = new Image(); im.src = DATA.images[name];
+  const v = { name, s, cv, tb, im }; views.push(v);
+  im.onload = () => draw(v);
+  cv.addEventListener("click", ev => {
+    const r = cv.getBoundingClientRect(), x = (ev.clientX - r.left) / Z, y = (ev.clientY - r.top) / Z;
+    const dish = s.dishes.find(d => (x - d.cx) ** 2 + (y - d.cy) ** 2 <= d.r ** 2);
+    if (!dish) return;
+    const k = String(dish.dish), c = cfor(name, k);
+    const ai = c.add.findIndex(a => (a[0] - x) ** 2 + (a[1] - y) ** 2 <= Math.max(a[2], 6) ** 2);
+    if (ai >= 0) { c.add.splice(ai, 1); }
+    else {
+      const hit = s.colonies[k].find(o => (o.x - x) ** 2 + (o.y - y) ** 2 <= (Math.max(o.r, 4) + 2) ** 2);
+      if (hit) { const i = c.remove.indexOf(hit.id); i >= 0 ? c.remove.splice(i, 1) : c.remove.push(hit.id); }
+      else c.add.push([+x.toFixed(1), +y.toFixed(1), 6]);
+    }
+    persist(); draw(v);
+  });
+}
+
+function draw(v) {
+  const { s, cv, im, tb, name } = v;
+  cv.width = im.width * Z; cv.height = im.height * Z;
+  const g = cv.getContext("2d"); g.imageSmoothingQuality = "high";
+  g.drawImage(im, 0, 0, cv.width, cv.height);
+  const K = css("--keep"), D = css("--drop"), A = css("--add");
+  g.font = `${10 + Z}px system-ui`; g.lineWidth = 1.5;
+  tb.innerHTML = "";
+  for (const d of s.dishes) {
+    const k = String(d.dish), c = (corr[name] || {})[k] || { remove: [], add: [] };
+    g.strokeStyle = "#3494BA"; g.beginPath(); g.arc(d.cx * Z, d.cy * Z, d.r * Z, 0, 7); g.stroke();
+    g.fillStyle = "#3494BA"; g.font = `bold ${14 + 2 * Z}px system-ui`;
+    g.fillText("P" + k, (d.cx - d.r) * Z, (d.cy - d.r) * Z + 18 + 2 * Z);
+    g.font = `${9 + Z}px system-ui`;
+    for (const o of s.colonies[k]) {
+      const out = c.remove.includes(o.id); g.strokeStyle = g.fillStyle = out ? D : K;
+      const rr = (Math.max(o.r, 3) + 1.5) * Z;
+      g.beginPath(); g.arc(o.x * Z, o.y * Z, rr, 0, 7); g.stroke();
+      if (Z >= 2) g.fillText(o.id, o.x * Z + rr, o.y * Z - rr);
+    }
+    g.strokeStyle = A; g.lineWidth = 2;
+    for (const a of c.add) { g.beginPath(); g.arc(a[0] * Z, a[1] * Z, Math.max(a[2], 5) * Z, 0, 7); g.stroke(); }
+    g.lineWidth = 1.5;
+    const auto = s.colonies[k].length, fin = auto - c.remove.length + c.add.length;
+    // mean size of the kept colonies; hand-added ones are measured on save
+    const kept = s.colonies[k].filter(o => !c.remove.includes(o.id));
+    const pct = kept.length ? (kept.reduce((t, o) => t + o.area, 0) / kept.length).toFixed(0) + (c.add.length ? "*" : "") : "–";
+    tb.insertAdjacentHTML("beforeend",
+      `<tr><td>P${k}</td><td>${auto}</td><td>${c.remove.length}</td><td>${c.add.length}</td><td><b>${fin}</b></td><td><b>${pct}</b></td></tr>`);
+  }
+}
+
+function clean() {
+  const o = {};
+  for (const [img, ds] of Object.entries(corr)) for (const [k, c] of Object.entries(ds))
+    if (c.remove.length || c.add.length) { o[img] ??= {}; o[img][k] = c; }
+  return JSON.stringify(o, null, 1);
+}
+document.getElementById("zoom").oninput = e => { Z = +e.target.value; views.forEach(draw); };
+const status = t => document.getElementById("status").textContent = t;
+document.getElementById("save").onclick = async () => {
+  if (!SERVED) {  // page opened as a file: no server, download instead
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([clean()], { type: "application/json" }));
+    a.download = "corrections.json"; a.click();
+    const txt = "corrections.json:\n" + clean();
+    let ok = false;
+    try { await navigator.clipboard.writeText(txt); ok = true; } catch (e) {
+      const t = document.createElement("textarea"); t.value = txt; document.body.appendChild(t); t.select();
+      try { ok = document.execCommand("copy"); } catch (e2) {} t.remove();
+    }
+    status(ok ? "copied ✓ paste it in the chat (also downloaded as corrections.json)" : "downloaded corrections.json: put it in the results folder and tell Claude");
+    return;
+  }
+  status("saving…");
+  const r = await fetch("/save", { method: "POST", body: clean() });
+  if (r.ok) { try { localStorage.removeItem(KEY); } catch (e) {} status("saved to the folder ✓ table updated"); }
+  else status("save failed");
+};
+document.getElementById("done").onclick = async () => {
+  if (SERVED) { try { await fetch("/done", { method: "POST", body: "" }); } catch (e) {} }
+  status("closed — back to the chat");
+};
+</script>
+</body>
+</html>

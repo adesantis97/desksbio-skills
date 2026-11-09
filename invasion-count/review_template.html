@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Invasion review</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#f6f7f9; --fg:#1d1f24; --muted:#6b7280; --card:#fff; --line:#e3e6ea;
+          --accent:#3494BA; --drop:#dc2626; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#15171b; --fg:#e8eaed; --muted:#9aa0a6; --card:#1e2126; --line:#2c3036; }
+  }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.45 -apple-system, system-ui, sans-serif; }
+  header { position:sticky; top:0; z-index:5; background:var(--card); border-bottom:1px solid var(--line);
+           padding:10px 16px; display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:15px; margin:0 8px 0 0; }
+  button { font:inherit; border:1px solid var(--line); background:var(--card); color:var(--fg);
+           border-radius:6px; padding:6px 12px; cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  input[type=range] { vertical-align:middle; width:220px; }
+  .stat { font-variant-numeric:tabular-nums; }
+  .stat b { font-size:16px; }
+  main { padding:16px; display:grid; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); gap:14px; }
+  figure { margin:0; background:var(--card); border:1px solid var(--line); border-radius:10px;
+           padding:8px; position:relative; }
+  figure.off { opacity:.4; border-color:var(--drop); border-style:dashed; }
+  canvas { display:block; width:100%; height:auto; border-radius:6px; cursor:crosshair; }
+  figure button.x { font-size:12px; padding:2px 8px; }
+  .warn { color:#b45309; font-size:12px; }
+  figcaption { display:flex; justify-content:space-between; align-items:baseline; gap:8px;
+               margin-top:6px; font-variant-numeric:tabular-nums; }
+  figcaption .n { font-weight:600; font-size:15px; }
+  figcaption small { color:var(--muted); word-break:break-all; font-weight:400; }
+  .hint { color:var(--muted); font-size:13px; }
+  .spacer { flex:1; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title"></h1>
+  <label>Threshold <input id="thr" type="range" min="0" max="0.6" step="0.01">
+    <span class="stat" id="thrv"></span></label>
+  <label><input id="showmask" type="checkbox" checked> mask</label>
+  <span class="hint">Click a dot = remove it · click a cell without a dot = add one · "exclude" drops a field</span>
+  <span class="spacer"></span>
+  <span class="stat" id="summary"></span>
+  <button id="save" class="primary">Save and recompute</button>
+  <button id="done">Done</button>
+  <span id="status" class="hint"></span>
+</header>
+<main id="main"></main>
+<script>
+const DATA = /*__DATA__*/null;
+const S0 = -0.20, S1 = 2.20;                 // scale used by invasion_count.py to save the map
+const store = DATA.store, names = Object.keys(store.fields);
+const KEY = "invasion-review:" + DATA.title;
+
+const WORK = DATA.work_w, R = DATA.cell_r;
+const cthr = n => store.fields[n].cells_thr;                 // threshold the dots were computed at
+let thr = store.threshold, drop = new Set(), edits = {};
+const saved = DATA.corrections || {};
+if (saved.threshold != null) thr = saved.threshold;
+if (saved.exclude) drop = new Set(saved.exclude);
+if (saved.cells && saved.cells_thr === thr) edits = saved.cells;
+try { const d = JSON.parse(localStorage.getItem(KEY) || "null");
+      if (d) { thr = d.threshold; drop = new Set(d.exclude); edits = d.cells || {}; } } catch (e) {}
+const ed = n => (edits[n] ??= { remove: [], add: [] });
+
+document.getElementById("title").textContent = DATA.title;
+const views = [];
+
+for (const name of names) {
+  const fig = document.createElement("figure");
+  fig.innerHTML = `<canvas></canvas><figcaption><span class="n"></span><small>${name}</small>` +
+                  `<button class="x">exclude</button></figcaption>`;
+  document.getElementById("main").append(fig);
+  const cv = fig.querySelector("canvas");
+  const v = { name, fig, cv, g: cv.getContext("2d"), cap: fig.querySelector(".n"), ready: false };
+  views.push(v);
+  const prev = new Image(), stain = new Image();
+  prev.src = DATA.images[name].prev; stain.src = DATA.images[name].stain;
+  let left = 2;
+  const go = () => { if (--left) return;
+    cv.width = prev.naturalWidth; cv.height = prev.naturalHeight;
+    v.prev = prev;
+    const t = document.createElement("canvas");
+    t.width = cv.width; t.height = cv.height;
+    t.getContext("2d").drawImage(stain, 0, 0, cv.width, cv.height);
+    v.lum = t.getContext("2d").getImageData(0, 0, cv.width, cv.height).data;
+    v.ov = new ImageData(cv.width, cv.height);
+    for (let i = 0; i < v.ov.data.length; i += 4) {
+      v.ov.data[i] = 0; v.ov.data[i + 1] = 230; v.ov.data[i + 2] = 90; v.ov.data[i + 3] = 0;
+    }
+    v.tmp = document.createElement("canvas"); v.tmp.width = cv.width; v.tmp.height = cv.height;
+    v.ready = true; draw(v);
+  };
+  prev.onload = go; stain.onload = go;
+  fig.querySelector("button.x").addEventListener("click", () => {
+    drop.has(name) ? drop.delete(name) : drop.add(name);
+    persist(); draw(v); summarise();
+  });
+  cv.addEventListener("click", ev => {
+    if (Math.abs(thr - cthr(name)) > 1e-6 || drop.has(name)) return;
+    const b = cv.getBoundingClientRect();
+    const x = (ev.clientX - b.left) / b.width * WORK, y = (ev.clientY - b.top) / b.height * (WORK * cv.height / cv.width);
+    const e = ed(name), pts = store.fields[name].cells, hit = R * 0.8;
+    const ai = e.add.findIndex(([px, py]) => Math.hypot(px - x, py - y) < hit);
+    if (ai >= 0) e.add.splice(ai, 1);
+    else {
+      let best = -1, bd = hit;
+      pts.forEach(([px, py], i) => { const d = Math.hypot(px - x, py - y); if (d < bd) { bd = d; best = i; } });
+      if (best >= 0) { const k = e.remove.indexOf(best); k >= 0 ? e.remove.splice(k, 1) : e.remove.push(best); }
+      else e.add.push([Math.round(x), Math.round(y)]);
+    }
+    persist(); draw(v); summarise();
+  });
+}
+
+function draw(v) {
+  if (!v.ready) return;
+  const cut = (thr - S0) / (S1 - S0) * 255;
+  const d = v.ov.data, L = v.lum;          // L is grey RGBA: the R channel is the value
+  const mk = document.getElementById("showmask").checked;
+  for (let i = 0; i < d.length; i += 4) d[i + 3] = mk && L[i] > cut ? 110 : 0;
+  v.tmp.getContext("2d").putImageData(v.ov, 0, 0);
+  v.g.drawImage(v.prev, 0, 0);
+  v.g.drawImage(v.tmp, 0, 0);
+  v.fig.classList.toggle("off", drop.has(v.name));
+  v.fig.querySelector("button.x").textContent = drop.has(v.name) ? "restore" : "exclude";
+  const n = cells(v.name);
+  if (n == null) {
+    v.cap.innerHTML = `<span class="warn">save to count at ${thr.toFixed(2)}</span> · ${area(v.name).toFixed(1)} %`;
+    return;
+  }
+  const k = v.cv.width / WORK, g = v.g, e = edits[v.name] || { remove: [], add: [] };
+  const dot = (x, y, col) => { g.beginPath(); g.arc(x * k, y * k, 4.5, 0, 7); g.fillStyle = col; g.fill();
+                               g.lineWidth = 1; g.strokeStyle = "#000"; g.stroke(); };
+  store.fields[v.name].cells.forEach(([x, y], i) => {
+    if (e.remove.includes(i)) { g.strokeStyle = "#dc2626"; g.lineWidth = 2; g.beginPath();
+      g.moveTo(x * k - 5, y * k - 5); g.lineTo(x * k + 5, y * k + 5); g.moveTo(x * k + 5, y * k - 5); g.lineTo(x * k - 5, y * k + 5); g.stroke(); }
+    else dot(x, y, "#ffe100");
+  });
+  e.add.forEach(([x, y]) => dot(x, y, "#38bdf8"));
+  const conf = area(v.name) > DATA.confluent ? ' <span class="warn">confluent: minimum</span>' : "";
+  v.cap.innerHTML = `${n} cells · <span class="hint">${area(v.name).toFixed(1)} %</span>${conf}`;
+}
+function cells(n) {
+  if (Math.abs(thr - cthr(n)) > 1e-6) return null;
+  const e = edits[n] || { remove: [], add: [] };
+  return store.fields[n].cells.length - e.remove.length + e.add.length;
+}
+document.getElementById("showmask").onchange = () => views.forEach(draw);
+
+const area = n => store.fields[n].curve[thr.toFixed(2)];
+const kept = () => names.filter(n => !drop.has(n));
+
+const msd = a => { const m = a.reduce((s, x) => s + x, 0) / a.length;
+  return [m, Math.sqrt(a.reduce((s, x) => s + (x - m) ** 2, 0) / Math.max(1, a.length - 1))]; };
+function summarise() {
+  const k = kept(), [am] = msd(k.map(area)), c = k.map(cells);
+  let head;
+  if (c.some(x => x == null)) head = `<span class="warn">threshold changed: Save to recount</span>`;
+  else { const [m, sd] = msd(c); head = `<b>${m.toFixed(0)} ± ${sd.toFixed(0)} cells</b>`; }
+  document.getElementById("summary").innerHTML = head + ` &nbsp;<span class="hint">` +
+    `area ${am.toFixed(1)}% · ${k.length}/${names.length} fields</span>`;
+}
+
+const body = () => { const c = {};
+  for (const [n, e] of Object.entries(edits)) if (e.remove.length || e.add.length) c[n] = e;
+  const same = names.every(n => Math.abs(thr - cthr(n)) < 1e-6);   // clicks only count on the dots they were made on
+  return JSON.stringify({ threshold: thr, exclude: [...drop], cells_thr: thr, cells: same ? c : {} }, null, 1); };
+const persist = () => { try { localStorage.setItem(KEY, JSON.stringify(
+  { threshold: thr, exclude: [...drop], cells: edits })); } catch (e) {} };
+
+const slider = document.getElementById("thr");
+slider.value = thr;
+slider.oninput = e => {
+  thr = +e.target.value;
+  document.getElementById("thrv").textContent = thr.toFixed(2);
+  persist(); views.forEach(draw); summarise();
+};
+document.getElementById("thrv").textContent = thr.toFixed(2);
+summarise();
+
+const status = t => document.getElementById("status").textContent = t;
+document.getElementById("save").onclick = async () => {
+  const b = body();
+  if (!location.protocol.startsWith("http")) {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([b], { type: "application/json" }));
+    a.download = "corrections.json"; a.click();
+    const txt = "corrections.json:\n" + b;
+    let ok = false;
+    try { await navigator.clipboard.writeText(txt); ok = true; } catch (e) {
+      const t = document.createElement("textarea"); t.value = txt; document.body.appendChild(t); t.select();
+      try { ok = document.execCommand("copy"); } catch (e2) {} t.remove();
+    }
+    status(ok ? "copied ✓ paste it in the chat (also downloaded as corrections.json)" : "downloaded corrections.json: put it in the results folder and tell Claude");
+    return;
+  }
+  status("saving…");
+  const r = await fetch("/save", { method: "POST", body: b });
+  if (r.ok) { try { localStorage.removeItem(KEY); } catch (e) {} status("saved ✓ recounting…");
+              setTimeout(() => location.reload(), 300); }
+  else status("save failed");
+};
+document.getElementById("done").onclick = async () => {
+  if (location.protocol.startsWith("http")) { try { await fetch("/done", { method: "POST", body: "" }); } catch (e) {} }
+  status("closed — back to the chat");
+};
+</script>
+</body>
+</html>
